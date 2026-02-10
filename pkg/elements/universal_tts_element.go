@@ -128,6 +128,14 @@ func (e *UniversalTTSElement) synthesizeAndOutput(ctx context.Context, text stri
 		return err
 	}
 
+	// --- AGGIUNGI QUESTO LOG ---
+    log.Printf("[DEBUG TTS] Received Audio: %d bytes. Format: Rate=%d, Channels=%d, Encoding=%v", 
+        len(resp.AudioData), 
+        resp.AudioFormat.SampleRate, 
+        resp.AudioFormat.Channels, 
+        resp.AudioFormat.Encoding)
+    // ---------------------------
+
 	// Create audio message for the pipeline
 	// Convert MediaType to AudioMediaType
 	var mediaType pipeline.AudioMediaType

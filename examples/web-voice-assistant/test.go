@@ -1,20 +1,8 @@
-// Web Voice Assistant Example
-//
-// A real-time voice conversation assistant using WebRTC for audio transport.
-//
-// Architecture:
-//   WebRTC (48kHz) → Resample → VAD → 11labs ASR → OpenAI Chat → 11labs TTS → Resample → WebRTC
-//
-// Features:
-//   - Real-time voice conversation with AI
-//   - Low-latency streaming responses (gpt-4o-mini)
-//   - Voice activity detection with interrupt support
-//   - ElevenLabs high-quality ASR and TTS
-//
 // Usage:
 //
 //	go run examples/web-voice-assistant/test.go
 //	open http://localhost:8082
+
 package main
 
 import (
@@ -47,11 +35,6 @@ func main() {
 		log.Fatal("OPENAI_API_KEY is required")
 	}
 
-	elevenlabsKey := os.Getenv("ELEVENLABS_API_KEY")
-	if elevenlabsKey == "" {
-		log.Fatal("ELEVENLABS_API_KEY is required")
-	}
-
 	// Find VAD model
 	vadModelPath := findVADModel()
 	if vadModelPath == "" {
@@ -61,7 +44,7 @@ func main() {
 	// Get configuration from environment
 	httpPort := getEnv("VOICE_ASSISTANT_PORT", defaultHTTPPort)
 	udpPort := getEnvInt("VOICE_ASSISTANT_UDP_PORT", defaultUDPPort)
-	voice := getEnv("VOICE_ASSISTANT_VOICE", "Rachel")
+	voice := getEnv("VOICE_ASSISTANT_VOICE", "Coral")
 	systemPrompt := getEnv("VOICE_ASSISTANT_SYSTEM_PROMPT",
 		"You are a helpful voice assistant. Keep your responses concise, natural, and conversational. Respond in the same language as the user.")
 
@@ -77,7 +60,6 @@ func main() {
 	srv.SetPipelineFactory(func(ctx context.Context, session *realtimeapi.Session) (*pipeline.Pipeline, error) {
 		return createPipeline(ctx, session, PipelineConfig{
 			OpenAIKey:     openaiKey,
-			ElevenLabsKey: elevenlabsKey,
 			VADModelPath:  vadModelPath,
 			Voice:         voice,
 			SystemPrompt:  systemPrompt,
@@ -110,30 +92,28 @@ func main() {
 // PipelineConfig holds configuration for pipeline creation
 type PipelineConfig struct {
 	OpenAIKey     string
-	ElevenLabsKey string
 	VADModelPath  string
 	Voice         string
 	SystemPrompt  string
 }
 
-// createPipeline creates the voice assistant pipeline
 // createPipeline creates the voice assistant pipeline using OpenAI TTS
 func createPipeline(ctx context.Context, session *realtimeapi.Session, cfg PipelineConfig) (*pipeline.Pipeline, error) {
-	p := pipeline.NewPipeline("voice-assistant-" + session.ID)
+	pipe := pipeline.NewPipeline("voice-assistant-" + session.ID)
 
 	// Enable interrupt manager with hybrid mode
 	interruptConfig := pipeline.DefaultInterruptConfig()
 	interruptConfig.EnableHybridMode = true
 	interruptConfig.MinSpeechForConfirmMs = 300
 	interruptConfig.InterruptCooldownMs = 500
-	p.EnableInterruptManager(interruptConfig)
+	pipe.EnableInterruptManager(interruptConfig)
 
 	// Create elements
 	var elems []pipeline.Element
 	var prevElem pipeline.Element
 
 	// 1. Input resample: 48kHz → 16kHz (WebRTC to processing)
-	inputResample := elements.NewAudioResampleElement(24000, 16000, 1, 1)
+	inputResample := elements.NewAudioResampleElement(48000, 16000, 1, 1)
 	elems = append(elems, inputResample)
 	prevElem = inputResample
 
@@ -154,7 +134,7 @@ func createPipeline(ctx context.Context, session *realtimeapi.Session, cfg Pipel
 				log.Printf("[Pipeline] Warning: Failed to init VAD element: %v", err)
 			} else {
 				elems = append(elems, vadElem)
-				p.Link(prevElem, vadElem)
+				pipe.Link(prevElem, vadElem)
 				prevElem = vadElem
 				log.Printf("[Pipeline] VAD enabled")
 			}
@@ -165,8 +145,8 @@ func createPipeline(ctx context.Context, session *realtimeapi.Session, cfg Pipel
 	asrConfig := elements.WhisperSTTConfig{
 		APIKey:               cfg.OpenAIKey,
 		Language:             "it",
-		Model:                "whisper-1",
-		EnablePartialResults: false,
+		Model:                "gpt-4o-transcribe",
+		EnablePartialResults: true,
 		VADEnabled:           true,
 		SampleRate:           16000,
 		Channels:             1,
@@ -176,7 +156,7 @@ func createPipeline(ctx context.Context, session *realtimeapi.Session, cfg Pipel
 		return nil, err
 	}
 	elems = append(elems, asrElem)
-	p.Link(prevElem, asrElem)
+	pipe.Link(prevElem, asrElem)
 	prevElem = asrElem
 
 	// 4. Chat (OpenAI gpt-4o-mini)
@@ -193,66 +173,37 @@ func createPipeline(ctx context.Context, session *realtimeapi.Session, cfg Pipel
 		return nil, err
 	}
 	elems = append(elems, chatElem)
-	p.Link(prevElem, chatElem)
+	pipe.Link(prevElem, chatElem)
 	prevElem = chatElem
 
 	// 5. OpenAI TTS (gpt-4o-mini-tts)
 	ttsProvider := tts.NewOpenAITTSProvider(cfg.OpenAIKey)
-	ttsProvider.SetInstructions("Speak in a friendly and engaging tone in the same user language")
+	ttsProvider.SetInstructions("Speak in a friendly and engaging tone in the same user language. Coincise responses.")
 
 	ttsElem := elements.NewUniversalTTSElement(ttsProvider)
 	ttsElem.SetVoice("coral")       // scegli la voce: coral, alloy, ash, etc.
 	ttsElem.SetLanguage("it-IT")    // lingua
-	ttsElem.SetOption("speed", 1)   // velocità
+	ttsElem.SetOption("speed", 0.5)   // velocità
 
 	elems = append(elems, ttsElem)
-	p.Link(prevElem, ttsElem)
+	pipe.Link(prevElem, ttsElem)
 	prevElem = ttsElem
 
 	// 6. Output resample: 16kHz → 48kHz (processing to WebRTC)
-	// outputResample := elements.NewAudioResampleElement(16000, 48000, 1, 1)
-	// //log.Printf("[Pipeline] Output resample element created: %v", outputResample)
+	// outputResample := elements.NewAudioResampleElement(24000, 48000, 1, 1)
 	// elems = append(elems, outputResample)
-	// p.Link(prevElem, outputResample)
+	// pipe.Link(prevElem, outputResample)
 	// prevElem = outputResample
 
-	// outputResample := elements.NewSimpleResampler() 
-	// elems = append(elems, outputResample)
-	// p.Link(prevElem, outputResample)
-
 	// Add all elements to pipeline
-	p.AddElements(elems)
+	pipe.AddElements(elems)
 
 	log.Printf("[Pipeline] Created voice assistant pipeline for session %s", session.ID)
 	log.Printf("[Pipeline] Flow: Resample(48k→16k) → VAD → ASR(11labs) → Chat(gpt-4o-mini) → TTS(OpenAI gpt-4o-mini-tts) → Resample(16k→48k)")
 
-	return p, nil
+	return pipe, nil
 }
 
-
-// getVoiceID returns the ElevenLabs voice ID for a voice name
-func getVoiceID(name string) string {
-	voices := map[string]string{
-		"Rachel":  "21m00Tcm4TlvDq8ikWAM",
-		"Domi":    "AZnzlk1XvdvUeBnXmlld",
-		"Bella":   "EXAVITQu4vr4xnSDxMaL",
-		"Antoni":  "ErXwobaYiN019PkySvjV",
-		"Elli":    "MF3mGyEYCl7XYWbV9V6O",
-		"Josh":    "TxGEqnHWrfWFTfGW9XjX",
-		"Arnold":  "VR6AewLTigWG4xSOukaG",
-		"Adam":    "pNInz6obpgDQGcFmaJgB",
-		"Sam":     "yoZ06aMxZJJ28mfd3POQ",
-	}
-
-	if id, ok := voices[name]; ok {
-		return id
-	}
-	// Return as-is if it looks like an ID
-	if len(name) > 10 {
-		return name
-	}
-	return voices["Rachel"] // Default
-}
 
 // findVADModel looks for the VAD model in common locations
 func findVADModel() string {
