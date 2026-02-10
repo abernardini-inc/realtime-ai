@@ -13,9 +13,7 @@
 //
 // Usage:
 //
-//	export OPENAI_API_KEY=sk-xxx
-//	export ELEVENLABS_API_KEY=xi-xxx
-//	go run examples/web-voice-assistant/main.go
+//	go run examples/web-voice-assistant/test.go
 //	open http://localhost:8082
 package main
 
@@ -119,6 +117,7 @@ type PipelineConfig struct {
 }
 
 // createPipeline creates the voice assistant pipeline
+// createPipeline creates the voice assistant pipeline using OpenAI TTS
 func createPipeline(ctx context.Context, session *realtimeapi.Session, cfg PipelineConfig) (*pipeline.Pipeline, error) {
 	p := pipeline.NewPipeline("voice-assistant-" + session.ID)
 
@@ -134,7 +133,7 @@ func createPipeline(ctx context.Context, session *realtimeapi.Session, cfg Pipel
 	var prevElem pipeline.Element
 
 	// 1. Input resample: 48kHz → 16kHz (WebRTC to processing)
-	inputResample := elements.NewAudioResampleElement(48000, 16000, 1, 1)
+	inputResample := elements.NewAudioResampleElement(24000, 16000, 1, 1)
 	elems = append(elems, inputResample)
 	prevElem = inputResample
 
@@ -162,17 +161,17 @@ func createPipeline(ctx context.Context, session *realtimeapi.Session, cfg Pipel
 		}
 	}
 
-	// 3. ElevenLabs ASR
-	asrConfig := elements.ElevenLabsRealtimeSTTConfig{
-		APIKey:               cfg.ElevenLabsKey,
-		Language:             "en", // Auto-detect works well too
-		Model:                "scribe_v2_realtime",
-		EnablePartialResults: false, // Only final results to reduce LLM calls
-		VADEnabled:           true,  // Use VAD events for commit
+	// 3. Whisper STT
+	asrConfig := elements.WhisperSTTConfig{
+		APIKey:               cfg.OpenAIKey,
+		Language:             "it",
+		Model:                "whisper-1",
+		EnablePartialResults: false,
+		VADEnabled:           true,
 		SampleRate:           16000,
 		Channels:             1,
 	}
-	asrElem, err := elements.NewElevenLabsRealtimeSTTElement(asrConfig)
+	asrElem, err := elements.NewWhisperSTTElement(asrConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -197,37 +196,39 @@ func createPipeline(ctx context.Context, session *realtimeapi.Session, cfg Pipel
 	p.Link(prevElem, chatElem)
 	prevElem = chatElem
 
-	// 5. ElevenLabs TTS
-	ttsConfig := tts.ElevenLabsWSTTSConfig{
-		APIKey:  cfg.ElevenLabsKey,
-		VoiceID: getVoiceID(cfg.Voice),
-		Model:   "eleven_turbo_v2_5",
-		Speed:   1.0,
-	}
-	ttsProvider, err := tts.NewElevenLabsWSTTSProvider(ttsConfig)
-	if err != nil {
-		return nil, err
-	}
+	// 5. OpenAI TTS (gpt-4o-mini-tts)
+	ttsProvider := tts.NewOpenAITTSProvider(cfg.OpenAIKey)
+	ttsProvider.SetInstructions("Speak in a friendly and engaging tone in the same user language")
+
 	ttsElem := elements.NewUniversalTTSElement(ttsProvider)
+	ttsElem.SetVoice("coral")       // scegli la voce: coral, alloy, ash, etc.
+	ttsElem.SetLanguage("it-IT")    // lingua
+	ttsElem.SetOption("speed", 1)   // velocità
+
 	elems = append(elems, ttsElem)
 	p.Link(prevElem, ttsElem)
 	prevElem = ttsElem
 
 	// 6. Output resample: 16kHz → 48kHz (processing to WebRTC)
-	// Note: ElevenLabs outputs 22050Hz or 24000Hz depending on model
-	// We'll use 24000 → 48000 for eleven_turbo_v2_5
-	outputResample := elements.NewAudioResampleElement(24000, 48000, 1, 1)
-	elems = append(elems, outputResample)
-	p.Link(prevElem, outputResample)
+	// outputResample := elements.NewAudioResampleElement(16000, 48000, 1, 1)
+	// //log.Printf("[Pipeline] Output resample element created: %v", outputResample)
+	// elems = append(elems, outputResample)
+	// p.Link(prevElem, outputResample)
+	// prevElem = outputResample
+
+	// outputResample := elements.NewSimpleResampler() 
+	// elems = append(elems, outputResample)
+	// p.Link(prevElem, outputResample)
 
 	// Add all elements to pipeline
 	p.AddElements(elems)
 
 	log.Printf("[Pipeline] Created voice assistant pipeline for session %s", session.ID)
-	log.Printf("[Pipeline] Flow: Resample(48k→16k) → VAD → ASR(11labs) → Chat(gpt-4o-mini) → TTS(11labs) → Resample(24k→48k)")
+	log.Printf("[Pipeline] Flow: Resample(48k→16k) → VAD → ASR(11labs) → Chat(gpt-4o-mini) → TTS(OpenAI gpt-4o-mini-tts) → Resample(16k→48k)")
 
 	return p, nil
 }
+
 
 // getVoiceID returns the ElevenLabs voice ID for a voice name
 func getVoiceID(name string) string {

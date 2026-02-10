@@ -15,7 +15,7 @@
 //	provider.SetInstructions("Speak in a cheerful tone")
 //	audioChan, errChan := provider.StreamSynthesize(ctx, req)
 
-package tts
+package tts 
 
 import (
 	"bufio"

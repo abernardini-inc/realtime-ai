@@ -6,12 +6,52 @@ import (
 	"log"
 	"os"
 	"time"
+	"encoding/binary"
+    "os/exec"
 
 	"github.com/joho/godotenv"
 	"github.com/realtime-ai/realtime-ai/pkg/elements"
 	"github.com/realtime-ai/realtime-ai/pkg/pipeline"
 	"github.com/realtime-ai/realtime-ai/pkg/tts"
 )
+
+func playAudioPCM(audio *pipeline.AudioData) error {
+    // Creiamo un file WAV
+    f, err := os.Create("output.wav")
+    if err != nil {
+        return err
+    }
+    defer f.Close()
+
+    // Header WAV semplice (16 bit PCM)
+    // Formato minimale: 16-bit PCM, stereo o mono
+    numChannels := audio.Channels
+    sampleRate := audio.SampleRate
+    bitsPerSample := 16
+    byteRate := sampleRate * numChannels * bitsPerSample / 8
+    blockAlign := numChannels * bitsPerSample / 8
+    dataSize := len(audio.Data)
+
+    // Scrive header WAV
+    f.Write([]byte("RIFF"))
+    binary.Write(f, binary.LittleEndian, uint32(36+dataSize))
+    f.Write([]byte("WAVEfmt "))
+    binary.Write(f, binary.LittleEndian, uint32(16)) // PCM header size
+    binary.Write(f, binary.LittleEndian, uint16(1))  // Audio format PCM
+    binary.Write(f, binary.LittleEndian, uint16(numChannels))
+    binary.Write(f, binary.LittleEndian, uint32(sampleRate))
+    binary.Write(f, binary.LittleEndian, uint32(byteRate))
+    binary.Write(f, binary.LittleEndian, uint16(blockAlign))
+    binary.Write(f, binary.LittleEndian, uint16(bitsPerSample))
+    f.Write([]byte("data"))
+    binary.Write(f, binary.LittleEndian, uint32(dataSize))
+    f.Write(audio.Data)
+
+    // Riproduce con player di sistema (modifica in base al tuo OS)
+    cmd := exec.Command("ffplay", "-autoexit", "output.wav")
+    return cmd.Run()
+}
+
 
 func main() {
 	// Load environment variables from .env file
@@ -82,13 +122,10 @@ func main() {
 		select {
 		case audioMsg := <-ttsElement.Out():
 			if audioMsg.AudioData != nil {
-				fmt.Printf("Received audio: %d bytes, %d Hz, %d channels\n",
-					len(audioMsg.AudioData.Data),
-					audioMsg.AudioData.SampleRate,
-					audioMsg.AudioData.Channels)
-
-				// Here you could save the audio to a file or send it to another element
-				// For example, you could link it to an AudioPacerSinkElement for playback
+				fmt.Printf("Received audio: %d bytes\n", len(audioMsg.AudioData.Data))
+				if err := playAudioPCM(audioMsg.AudioData); err != nil {
+					log.Printf("Error playing audio: %v", err)
+				}
 			}
 		case <-time.After(10 * time.Second):
 			log.Printf("Timeout waiting for audio output")

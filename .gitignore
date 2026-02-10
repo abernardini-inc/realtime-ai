@@ -40,4 +40,5 @@ go.work.sum
 /translation-demo
 /webrtc-realtime-api
 /whisper-stt
-
+/onnxruntime-linux-x64-1.20.1
+/models
