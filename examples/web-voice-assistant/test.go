@@ -142,18 +142,31 @@ func createPipeline(ctx context.Context, session *realtimeapi.Session, cfg Pipel
 	}
 
 	// 3. Whisper STT
-	asrConfig := elements.WhisperSTTConfig{
-		APIKey:               cfg.OpenAIKey,
-		Language:             "it",
-		Model:                "gpt-4o-transcribe",
-		EnablePartialResults: true,
-		VADEnabled:           true,
-		SampleRate:           16000,
-		Channels:             1,
+	// asrConfig := elements.WhisperSTTConfig{
+	// 	APIKey:               cfg.OpenAIKey,
+	// 	Language:             "it",
+	// 	Model:                "gpt-4o-transcribe",
+	// 	EnablePartialResults: true,
+	// 	VADEnabled:           true,
+	// 	SampleRate:           16000,
+	// 	Channels:             1,
+	// }
+	// asrElem, err := elements.NewWhisperSTTElement(asrConfig)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	
+	config := elements.WhisperSTTConfig{
+		APIKey:     os.Getenv("GROQ_API_KEY"),
+		BaseURL:    "https://api.groq.com/openai/v1", // Endpoint di Groq
+		Model:      "whisper-large-v3",                // Modello Groq (molto veloce)
+		Language:   "it",
+		VADEnabled: true,                              // Consigliato con Groq
 	}
-	asrElem, err := elements.NewWhisperSTTElement(asrConfig)
+
+	asrElem, err := elements.NewWhisperSTTElement(config)
 	if err != nil {
-		return nil, err
+		log.Fatal(err)
 	}
 	elems = append(elems, asrElem)
 	pipe.Link(prevElem, asrElem)

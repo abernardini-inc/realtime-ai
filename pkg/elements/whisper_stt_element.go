@@ -16,12 +16,10 @@ import (
 // Ensure WhisperSTTElement implements pipeline.Element
 var _ pipeline.Element = (*WhisperSTTElement)(nil)
 
-// WhisperSTTElement implements speech-to-text using OpenAI Whisper API.
-// It can work standalone or integrate with VAD for optimized recognition.
+// WhisperSTTElement implements speech-to-text using OpenAI or Groq Whisper API.
 type WhisperSTTElement struct {
 	*pipeline.BaseElement
 
-	// ASR provider (abstraction allows for easy replacement)
 	provider asr.Provider
 
 	// ASR configuration
@@ -57,71 +55,72 @@ type WhisperSTTElement struct {
 
 // WhisperSTTConfig holds configuration for WhisperSTTElement.
 type WhisperSTTConfig struct {
-	// APIKey is the OpenAI API key (if empty, will use OPENAI_API_KEY env var)
+	// APIKey is the API key (OpenAI or Groq)
 	APIKey string
 
-	// Language code (e.g., "en", "zh", "auto" for auto-detection)
-	// Leave empty for auto-detection
+	// BaseURL allows overriding the API endpoint (e.g. for Groq)
+	// Default: "https://api.openai.com/v1"
+	BaseURL string
+
+	// Language code (e.g., "en", "it")
 	Language string
 
-	// Model to use (default: "whisper-1")
+	// Model to use (e.g. "whisper-1" or "whisper-large-v3")
 	Model string
 
-	// EnablePartialResults enables interim results during recognition
 	EnablePartialResults bool
-
-	// Prompt provides context to guide the recognition
-	Prompt string
-
-	// Temperature for sampling (0.0-1.0, default: 0.0)
-	Temperature float32
-
-	// VADEnabled determines if element should listen to VAD events
-	// When true, recognition is triggered by VAD speech start/end events
-	// When false, recognition runs continuously on buffered audio
-	VADEnabled bool
-
-	// SampleRate in Hz (default: 16000)
-	SampleRate int
-
-	// Channels (default: 1 for mono)
-	Channels int
-
-	// BitsPerSample (default: 16)
-	BitsPerSample int
+	Prompt               string
+	Temperature          float32
+	VADEnabled           bool
+	SampleRate           int
+	Channels             int
+	BitsPerSample        int
 }
 
-// NewWhisperSTTElement creates a new Whisper STT element.
+// NewWhisperSTTElement creates a new Whisper STT element (compatible with OpenAI and Groq).
 func NewWhisperSTTElement(config WhisperSTTConfig) (*WhisperSTTElement, error) {
 	// Get API key from config or environment
 	apiKey := config.APIKey
 	if apiKey == "" {
-		apiKey = os.Getenv("OPENAI_API_KEY")
+		// Fallback to specific env vars depending on usage, or generic OPENAI_API_KEY
+		apiKey = os.Getenv("GROQ_API_KEY") 
+		if apiKey == "" {
+			apiKey = os.Getenv("OPENAI_API_KEY")
+		}
 	}
 
 	if apiKey == "" {
-		return nil, fmt.Errorf("OpenAI API key is required (set APIKey or OPENAI_API_KEY env var)")
+		return nil, fmt.Errorf("API key is required")
 	}
 
-	// Create Whisper provider
-	provider, err := asr.NewWhisperProvider(apiKey)
+	// Set Default BaseURL
+	baseURL := config.BaseURL
+	if baseURL == "" {
+		baseURL = "https://api.openai.com/v1"
+	}
+
+	// Set Default Model based on provider
+	if config.Model == "" {
+		if baseURL == "https://api.openai.com/v1" {
+			config.Model = "whisper-1"
+		} else {
+			// Default logic for Groq or others
+			config.Model = "whisper-large-v3"
+		}
+	}
+
+	// NOTA: Qui stiamo passando BaseURL al provider.
+	// Assicurati che asr.NewWhisperProvider supporti il secondo parametro (baseURL).
+	// Se il tuo package asr non lo supporta ancora, dovrai modificare anche quello.
+	// Se non puoi modificare asr, fammelo sapere.
+	provider, err := asr.NewWhisperProvider(apiKey, baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Whisper provider: %w", err)
 	}
 
-	// Set defaults
-	if config.Model == "" {
-		config.Model = "whisper-1"
-	}
-	if config.SampleRate == 0 {
-		config.SampleRate = 16000
-	}
-	if config.Channels == 0 {
-		config.Channels = 1
-	}
-	if config.BitsPerSample == 0 {
-		config.BitsPerSample = 16
-	}
+	if config.SampleRate == 0 { config.SampleRate = 16000 }
+	if config.Channels == 0 { config.Channels = 1 }
+	if config.BitsPerSample == 0 { config.BitsPerSample = 16 }
 
 	elem := &WhisperSTTElement{
 		BaseElement:          pipeline.NewBaseElement("whisper-stt", 100),
@@ -135,10 +134,9 @@ func NewWhisperSTTElement(config WhisperSTTConfig) (*WhisperSTTElement, error) {
 		sampleRate:           config.SampleRate,
 		channels:             config.Channels,
 		bitsPerSample:        config.BitsPerSample,
-		audioBuffer:          make([]byte, 0, 16000*2*10), // 10 seconds buffer
+		audioBuffer:          make([]byte, 0, 16000*2*10), 
 	}
 
-	// Register properties for runtime configuration
 	elem.registerProperties()
 
 	return elem, nil
@@ -153,7 +151,6 @@ func (e *WhisperSTTElement) registerProperties() {
 		Readable: true,
 		Default:  e.language,
 	})
-
 	e.RegisterProperty(pipeline.PropertyDesc{
 		Name:     "model",
 		Type:     reflect.TypeOf(""),
@@ -161,7 +158,6 @@ func (e *WhisperSTTElement) registerProperties() {
 		Readable: true,
 		Default:  e.model,
 	})
-
 	e.RegisterProperty(pipeline.PropertyDesc{
 		Name:     "enable_partial_results",
 		Type:     reflect.TypeOf(false),
@@ -169,7 +165,6 @@ func (e *WhisperSTTElement) registerProperties() {
 		Readable: true,
 		Default:  e.enablePartialResults,
 	})
-
 	e.RegisterProperty(pipeline.PropertyDesc{
 		Name:     "vad_enabled",
 		Type:     reflect.TypeOf(false),
@@ -187,33 +182,27 @@ func (e *WhisperSTTElement) Start(ctx context.Context) error {
 	log.Printf("[WhisperSTT] Starting element (VAD: %v, Language: %s, Model: %s)",
 		e.vadEnabled, e.language, e.model)
 
-	// Subscribe to VAD events if VAD is enabled
 	if e.vadEnabled && e.BaseElement.Bus() != nil {
 		e.vadEventsSub = make(chan pipeline.Event, 10)
 		e.BaseElement.Bus().Subscribe(pipeline.EventVADSpeechStart, e.vadEventsSub)
 		e.BaseElement.Bus().Subscribe(pipeline.EventVADSpeechEnd, e.vadEventsSub)
-
 		log.Printf("[WhisperSTT] Subscribed to VAD events")
 	}
 
-	// Start audio processing goroutine
 	e.wg.Add(1)
 	go e.processAudio(ctx)
 
-	// Start VAD event handler if enabled
 	if e.vadEnabled {
 		e.wg.Add(1)
 		go e.handleVADEvents(ctx)
 	}
 
-	// Start streaming recognizer
 	if err := e.startRecognizer(ctx); err != nil {
 		cancel()
 		e.wg.Wait()
 		return fmt.Errorf("failed to start recognizer: %w", err)
 	}
 
-	// Start result handler
 	e.wg.Add(1)
 	go e.handleResults(ctx)
 
@@ -223,27 +212,20 @@ func (e *WhisperSTTElement) Start(ctx context.Context) error {
 // Stop stops the Whisper STT element.
 func (e *WhisperSTTElement) Stop() error {
 	log.Printf("[WhisperSTT] Stopping element")
-
 	if e.cancel != nil {
 		e.cancel()
 		e.wg.Wait()
 		e.cancel = nil
 	}
-
-	// Close recognizer
 	e.recognizerLock.Lock()
 	if e.recognizer != nil {
 		e.recognizer.Close()
 		e.recognizer = nil
 	}
 	e.recognizerLock.Unlock()
-
-	// Close provider
 	if e.provider != nil {
 		e.provider.Close()
 	}
-
-	// Unsubscribe from VAD events
 	if e.vadEventsSub != nil {
 		if e.BaseElement.Bus() != nil {
 			e.BaseElement.Bus().Unsubscribe(pipeline.EventVADSpeechStart, e.vadEventsSub)
@@ -252,7 +234,6 @@ func (e *WhisperSTTElement) Stop() error {
 		close(e.vadEventsSub)
 		e.vadEventsSub = nil
 	}
-
 	log.Printf("[WhisperSTT] Stopped")
 	return nil
 }
@@ -290,43 +271,27 @@ func (e *WhisperSTTElement) startRecognizer(ctx context.Context) error {
 // processAudio processes incoming audio messages.
 func (e *WhisperSTTElement) processAudio(ctx context.Context) {
 	defer e.wg.Done()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
-
 		case msg, ok := <-e.BaseElement.InChan:
-			if !ok {
-				return
-			}
-
-			// Only process audio messages
-			if msg.Type != pipeline.MsgTypeAudio || msg.AudioData == nil {
-				continue
-			}
-
-			// Validate audio format
+			if !ok { return }
+			if msg.Type != pipeline.MsgTypeAudio || msg.AudioData == nil { continue }
 			if msg.AudioData.SampleRate != e.sampleRate {
-				log.Printf("[WhisperSTT] Warning: Audio sample rate mismatch (expected %d, got %d)",
-					e.sampleRate, msg.AudioData.SampleRate)
+				log.Printf("[WhisperSTT] Warning: Rate mismatch (%d vs %d)", e.sampleRate, msg.AudioData.SampleRate)
 				continue
 			}
-
-			// Buffer audio
 			e.audioBufferLock.Lock()
 			e.audioBuffer = append(e.audioBuffer, msg.AudioData.Data...)
 			e.audioBufferLock.Unlock()
 
-			// If VAD is disabled, send audio directly to recognizer
 			if !e.vadEnabled {
 				e.sendAudioToRecognizer(ctx, msg.AudioData.Data)
 			} else {
-				// With VAD, we only send audio when speaking
 				e.speakingMutex.Lock()
 				isSpeaking := e.isSpeaking
 				e.speakingMutex.Unlock()
-
 				if isSpeaking {
 					e.sendAudioToRecognizer(ctx, msg.AudioData.Data)
 				}
@@ -338,54 +303,37 @@ func (e *WhisperSTTElement) processAudio(ctx context.Context) {
 // handleVADEvents processes VAD speech start/end events.
 func (e *WhisperSTTElement) handleVADEvents(ctx context.Context) {
 	defer e.wg.Done()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
-
 		case event, ok := <-e.vadEventsSub:
-			if !ok {
-				return
-			}
-
+			if !ok { return }
 			switch event.Type {
 			case pipeline.EventVADSpeechStart:
-				// Extract pre-roll audio from VAD payload
 				if payload, ok := event.Payload.(pipeline.VADPayload); ok {
-					// Send pre-roll audio first (before setting isSpeaking)
 					if len(payload.PreRollAudio) > 0 {
-						log.Printf("[WhisperSTT] VAD speech started with %d bytes pre-roll audio",
-							len(payload.PreRollAudio))
 						e.sendAudioToRecognizer(ctx, payload.PreRollAudio)
-						// Also add to buffer for recognizeBufferedAudio
 						e.audioBufferLock.Lock()
 						e.audioBuffer = append(e.audioBuffer[:0], payload.PreRollAudio...)
 						e.audioBufferLock.Unlock()
 					} else {
-						log.Printf("[WhisperSTT] VAD speech started (no pre-roll)")
 						e.audioBufferLock.Lock()
 						e.audioBuffer = e.audioBuffer[:0]
 						e.audioBufferLock.Unlock()
 					}
 				} else {
-					log.Printf("[WhisperSTT] VAD speech started (legacy payload)")
 					e.audioBufferLock.Lock()
 					e.audioBuffer = e.audioBuffer[:0]
 					e.audioBufferLock.Unlock()
 				}
-
 				e.speakingMutex.Lock()
 				e.isSpeaking = true
 				e.speakingMutex.Unlock()
-
 			case pipeline.EventVADSpeechEnd:
-				log.Printf("[WhisperSTT] VAD speech ended")
 				e.speakingMutex.Lock()
 				e.isSpeaking = false
 				e.speakingMutex.Unlock()
-
-				// Trigger recognition on buffered audio
 				e.recognizeBufferedAudio(ctx)
 			}
 		}
@@ -397,80 +345,49 @@ func (e *WhisperSTTElement) sendAudioToRecognizer(ctx context.Context, audioData
 	e.recognizerLock.Lock()
 	recognizer := e.recognizer
 	e.recognizerLock.Unlock()
-
-	if recognizer == nil {
-		return
-	}
-
+	if recognizer == nil { return }
 	if err := recognizer.SendAudio(ctx, audioData); err != nil {
-		log.Printf("[WhisperSTT] Error sending audio to recognizer: %v", err)
+		log.Printf("[WhisperSTT] Error sending audio: %v", err)
 	}
 }
 
-// recognizeBufferedAudio processes all buffered audio through the recognizer.
+// recognizeBufferedAudio processes all buffered audio.
 func (e *WhisperSTTElement) recognizeBufferedAudio(ctx context.Context) {
 	e.audioBufferLock.Lock()
 	if len(e.audioBuffer) == 0 {
 		e.audioBufferLock.Unlock()
 		return
 	}
-
 	audioData := make([]byte, len(e.audioBuffer))
 	copy(audioData, e.audioBuffer)
 	e.audioBufferLock.Unlock()
-
-	// Send to recognizer
 	e.sendAudioToRecognizer(ctx, audioData)
-
-	log.Printf("[WhisperSTT] Sent %d bytes of buffered audio for recognition", len(audioData))
 }
 
-// handleResults processes recognition results from the streaming recognizer.
+// handleResults processes recognition results.
 func (e *WhisperSTTElement) handleResults(ctx context.Context) {
 	defer e.wg.Done()
-
 	e.recognizerLock.Lock()
 	recognizer := e.recognizer
 	e.recognizerLock.Unlock()
-
-	if recognizer == nil {
-		log.Printf("[WhisperSTT] No recognizer available for results")
-		return
-	}
+	if recognizer == nil { return }
 
 	resultsChan := recognizer.Results()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
-
 		case result, ok := <-resultsChan:
-			if !ok {
-				log.Printf("[WhisperSTT] Results channel closed")
-				return
-			}
-
-			if result == nil {
-				continue
-			}
-
-			// Skip empty results
-			if result.Text == "" && !result.IsFinal {
-				continue
-			}
-
-			// Determine text type
+			if !ok { return }
+			if result == nil { continue }
+			if result.Text == "" && !result.IsFinal { continue }
 			textType := "text/partial"
 			eventType := pipeline.EventPartialResult
 			if result.IsFinal {
 				textType = "text/final"
 				eventType = pipeline.EventFinalResult
 			}
-
-			log.Printf("[WhisperSTT] Recognition result (%s): %s", textType, result.Text)
-
-			// Create text data message
+			log.Printf("[WhisperSTT] Result (%s): %s", textType, result.Text)
 			textMsg := &pipeline.PipelineMessage{
 				Type:      pipeline.MsgTypeData,
 				Timestamp: time.Now(),
@@ -480,15 +397,11 @@ func (e *WhisperSTTElement) handleResults(ctx context.Context) {
 					Timestamp: result.Timestamp,
 				},
 			}
-
-			// Send to output channel
 			select {
 			case e.BaseElement.OutChan <- textMsg:
 			case <-ctx.Done():
 				return
 			}
-
-			// Publish event to bus
 			if e.BaseElement.Bus() != nil {
 				e.BaseElement.Bus().Publish(pipeline.Event{
 					Type:      eventType,
@@ -505,45 +418,31 @@ func (e *WhisperSTTElement) SetProperty(name string, value interface{}) error {
 	switch name {
 	case "language":
 		if lang, ok := value.(string); ok {
-			e.language = lang
-			log.Printf("[WhisperSTT] Language set to: %s", lang)
-			return nil
+			e.language = lang; return nil
 		}
 	case "model":
 		if model, ok := value.(string); ok {
-			e.model = model
-			log.Printf("[WhisperSTT] Model set to: %s", model)
-			return nil
+			e.model = model; return nil
 		}
 	case "enable_partial_results":
 		if enable, ok := value.(bool); ok {
-			e.enablePartialResults = enable
-			log.Printf("[WhisperSTT] Partial results: %v", enable)
-			return nil
+			e.enablePartialResults = enable; return nil
 		}
 	case "vad_enabled":
 		if enable, ok := value.(bool); ok {
-			e.vadEnabled = enable
-			log.Printf("[WhisperSTT] VAD enabled: %v", enable)
-			return nil
+			e.vadEnabled = enable; return nil
 		}
 	}
-
 	return e.BaseElement.SetProperty(name, value)
 }
 
 // GetProperty gets a property value.
 func (e *WhisperSTTElement) GetProperty(name string) (interface{}, error) {
 	switch name {
-	case "language":
-		return e.language, nil
-	case "model":
-		return e.model, nil
-	case "enable_partial_results":
-		return e.enablePartialResults, nil
-	case "vad_enabled":
-		return e.vadEnabled, nil
+	case "language": return e.language, nil
+	case "model": return e.model, nil
+	case "enable_partial_results": return e.enablePartialResults, nil
+	case "vad_enabled": return e.vadEnabled, nil
 	}
-
 	return e.BaseElement.GetProperty(name)
 }

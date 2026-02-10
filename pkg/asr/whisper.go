@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"io"
 	"log"
-	"os"
 	"sync"
 	"time"
 
@@ -21,7 +20,8 @@ type WhisperProvider struct {
 
 // NewWhisperProvider creates a new OpenAI Whisper ASR provider.
 // apiKey is the OpenAI API key. If empty, it will use OPENAI_API_KEY from environment.
-func NewWhisperProvider(apiKey string) (*WhisperProvider, error) {
+// baseURL is the base URL for the OpenAI API. If empty, it will use the default OpenAI API URL.
+func NewWhisperProvider(apiKey string, baseURL string) (*WhisperProvider, error) {
 	if apiKey == "" {
 		return nil, &Error{
 			Code:    ErrCodeInvalidConfig,
@@ -30,7 +30,7 @@ func NewWhisperProvider(apiKey string) (*WhisperProvider, error) {
 	}
 
 	clientConfig := openai.DefaultConfig(apiKey)
-	if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
+	if baseURL != "" {
 		clientConfig.BaseURL = baseURL
 		log.Printf("[Whisper STT] Using BaseURL: %s", clientConfig.BaseURL)
 	}
