@@ -42,6 +42,7 @@ var _ pipeline.Element = (*ChatElement)(nil)
 type ChatConfig struct {
 	APIKey       string // OpenAI API key
 	Model        string // Model name (e.g., "gpt-4o-mini", "gpt-4o")
+	BaseURL      string // Optional custom API base URL (e.g., for Groq)
 	SystemPrompt string // System prompt for the assistant
 	MaxTokens    int    // Maximum tokens in response (0 = default)
 	Streaming    bool   // Enable streaming responses
@@ -56,6 +57,11 @@ type ChatElement struct {
 	config  ChatConfig
 	client  *openai.Client
 	history []openai.ChatCompletionMessageParamUnion
+
+	// --- CAMPI AGGIUNTI PER IL FILTRO DUPLICATI ---
+	lastInput     string
+	lastInputTime time.Time
+	// ---------------------------------------------
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -92,13 +98,19 @@ func (e *ChatElement) Start(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	e.cancel = cancel
 
-	// Initialize OpenAI client
+	// Initialize Client with custom BaseURL if provided
 	opts := []option.RequestOption{
 		option.WithAPIKey(e.config.APIKey),
 	}
-	if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
+	
+	// PRIORITÀ ALLA CONFIGURAZIONE ESPLICITA
+	if e.config.BaseURL != "" {
+		opts = append(opts, option.WithBaseURL(e.config.BaseURL))
+	} else if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
+		// Fallback all'env var solo se non specificato nella config
 		opts = append(opts, option.WithBaseURL(baseURL))
 	}
+
 	client := openai.NewClient(opts...)
 	e.client = &client
 
@@ -142,6 +154,7 @@ func (e *ChatElement) GetHistoryLength() int {
 }
 
 // processLoop handles incoming messages
+// processLoop handles incoming messages
 func (e *ChatElement) processLoop(ctx context.Context) {
 	for {
 		select {
@@ -152,13 +165,59 @@ func (e *ChatElement) processLoop(ctx context.Context) {
 				return
 			}
 			if msg.Type == pipeline.MsgTypeData && msg.TextData != nil {
-				text := strings.TrimSpace(string(msg.TextData.Data))
-				if text == "" {
+				// Normalizza il testo: trim spazi e minuscolo
+				originalText := strings.TrimSpace(string(msg.TextData.Data))
+				if originalText == "" {
 					continue
 				}
+				
+				lowerText := strings.ToLower(originalText)
+
+				// --- 1. FILTRO ALLUCINAZIONI WHISPER (Quello che avevamo già) ---
+				if len(lowerText) < 2 { continue }
+				
+				badPrefixes := []string{"sottotitoli", "copyright", "traduzione"}
+				isTechnical := false
+				for _, p := range badPrefixes {
+					if strings.HasPrefix(lowerText, p) { isTechnical = true; break }
+				}
+				if isTechnical { continue }
+				// -------------------------------------------------------------
+
+				// --- 2. NUOVO FILTRO DUPLICATI (DEBOUNCE) ---
+				// Risolve il problema del doppio invio ("chi sei" -> "chi sei? chi sei?")
+				
+				// Controlla se è passato poco tempo dall'ultimo messaggio (es. 6 secondi)
+				timeSinceLast := time.Since(e.lastInputTime)
+				isRecent := timeSinceLast < 6*time.Second
+
+				if isRecent && e.lastInput != "" {
+					// Caso A: Testo Identico (es. Whisper rimanda la stessa frase)
+					if lowerText == e.lastInput {
+						log.Printf("[ChatElement] Ignored identical duplicate: '%s'", originalText)
+						continue
+					}
+
+					// Caso B: Il nuovo testo CONTIENE il vecchio (es. Buffer cresciuto: "chi sei" -> "chi sei? chi sei?")
+					if strings.Contains(lowerText, e.lastInput) {
+						log.Printf("[ChatElement] Ignored growing buffer duplicate: '%s' (contains '%s')", originalText, e.lastInput)
+						continue
+					}
+					
+					// Caso C: Il vecchio testo conteneva il nuovo (es. Frammento arrivato in ritardo)
+					if strings.Contains(e.lastInput, lowerText) {
+						log.Printf("[ChatElement] Ignored lagging fragment: '%s'", originalText)
+						continue
+					}
+				}
+
+				// Aggiorna l'ultimo input valido
+				e.lastInput = lowerText
+				e.lastInputTime = time.Now()
+				// ---------------------------------------------
 
 				// Process the message
-				if err := e.processMessage(ctx, text, msg.SessionID); err != nil {
+				if err := e.processMessage(ctx, originalText, msg.SessionID); err != nil {
 					log.Printf("[ChatElement] Error processing message: %v", err)
 					e.BaseElement.Bus().Publish(pipeline.Event{
 						Type:      pipeline.EventError,
