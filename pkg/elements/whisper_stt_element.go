@@ -109,10 +109,6 @@ func NewWhisperSTTElement(config WhisperSTTConfig) (*WhisperSTTElement, error) {
 		}
 	}
 
-	// NOTA: Qui stiamo passando BaseURL al provider.
-	// Assicurati che asr.NewWhisperProvider supporti il secondo parametro (baseURL).
-	// Se il tuo package asr non lo supporta ancora, dovrai modificare anche quello.
-	// Se non puoi modificare asr, fammelo sapere.
 	provider, err := asr.NewWhisperProvider(apiKey, baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Whisper provider: %w", err)

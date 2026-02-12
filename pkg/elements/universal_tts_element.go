@@ -107,9 +107,85 @@ func (e *UniversalTTSElement) processMessages(ctx context.Context) {
 					log.Printf("[%s] Failed to synthesize speech: %v", e.provider.Name(), err)
 					e.publishError(fmt.Sprintf("Failed to synthesize speech: %v", err))
 				}
+				// // CONTROLLO: Se il provider supporta lo streaming, usalo.
+				// if streamingProvider, ok := e.provider.(tts.StreamingTTSProvider); ok {
+				// 	if err := e.streamSynthesizeAndOutput(ctx, streamingProvider, text); err != nil {
+				// 		log.Printf("[%s] Failed to stream speech: %v", e.provider.Name(), err)
+				// 		e.publishError(fmt.Sprintf("Failed to stream speech: %v", err))
+				// 	}
+				// } else {
+				// 	// Fallback al metodo bloccante esistente
+				// 	if err := e.synthesizeAndOutput(ctx, text); err != nil {
+				// 		log.Printf("[%s] Failed to synthesize speech: %v", e.provider.Name(), err)
+				// 		e.publishError(fmt.Sprintf("Failed to synthesize speech: %v", err))
+				// 	}
+				// }
 			}
 		}
 	}
+}
+
+
+func (e *UniversalTTSElement) streamSynthesizeAndOutput(ctx context.Context, provider tts.StreamingTTSProvider, text string) error {
+	req := &tts.SynthesizeRequest{
+		Text:     text,
+		Voice:    e.voice,
+		Language: e.language,
+		Options:  e.options,
+	}
+
+	log.Printf("[%s] Starting stream synthesis for: %s...", e.provider.Name(), text[:min(len(text), 20)])
+
+	// Chiama il metodo StreamSynthesize del provider
+	audioChan, errChan := provider.StreamSynthesize(ctx, req)
+
+	// NOTA: In streaming, assumiamo il formato standard del provider (es. 24kHz PCM)
+	// o quello impostato nelle opzioni. OpenAI di default è 24000Hz.
+	sampleRate := 24000
+	if sr, ok := e.options["sample_rate"].(int); ok {
+		sampleRate = sr
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-errChan:
+			if err != nil {
+				return err
+			}
+		case chunk, ok := <-audioChan:
+			if !ok {
+				// Canale chiuso, streaming finito
+				log.Printf("[%s] Stream finished", e.provider.Name())
+				return nil
+			}
+
+			if len(chunk) > 0 {
+				// Crea il messaggio per la pipeline con il chunk audio
+				msg := &pipeline.PipelineMessage{
+					Type: pipeline.MsgTypeAudio,
+					AudioData: &pipeline.AudioData{
+						Data:       chunk,
+						SampleRate: sampleRate,
+						Channels:   1,
+						MediaType:  pipeline.AudioMediaTypePCM, // Assumiamo PCM per lo streaming
+						Timestamp:  time.Now(),
+					},
+				}
+				// Invia il chunk immediatamente
+				e.BaseElement.OutChan <- msg
+			}
+		}
+	}
+}
+
+// Helper function per il log
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // synthesizeAndOutput synthesizes speech from text and outputs audio data
