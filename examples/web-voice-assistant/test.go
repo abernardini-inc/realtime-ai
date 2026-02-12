@@ -196,17 +196,17 @@ func createPipeline(ctx context.Context, session *realtimeapi.Session, cfg Pipel
 	ttsElem := elements.NewUniversalTTSElement(ttsProvider)
 	ttsElem.SetVoice("coral")       // scegli la voce: coral, alloy, ash, etc.
 	ttsElem.SetLanguage("it-IT")    // lingua
-	ttsElem.SetOption("speed", 0.5)   // velocità
+	ttsElem.SetOption("speed", 1.2)   // velocità
 
 	elems = append(elems, ttsElem)
 	pipe.Link(prevElem, ttsElem)
 	prevElem = ttsElem
 
-	// 6. Output resample: 16kHz → 48kHz (processing to WebRTC)
-	// outputResample := elements.NewAudioResampleElement(24000, 48000, 1, 1)
-	// elems = append(elems, outputResample)
-	// pipe.Link(prevElem, outputResample)
-	// prevElem = outputResample
+	// 6. Nuova soluzione: Simple Resampler manuale
+	customResample := NewSimpleResamplerElement()
+	elems = append(elems, customResample)
+	pipe.Link(prevElem, customResample)
+	prevElem = customResample
 
 	// Add all elements to pipeline
 	pipe.AddElements(elems)
@@ -274,4 +274,45 @@ func parseInt(s string) (int, error) {
 		n = n*10 + int(c-'0')
 	}
 	return n, nil
+}
+
+type SimpleResamplerElement struct {
+    *pipeline.BaseElement
+}
+
+func NewSimpleResamplerElement() *SimpleResamplerElement {
+    return &SimpleResamplerElement{
+        BaseElement: pipeline.NewBaseElement("simple-resampler", 100),
+    }
+}
+
+func (e *SimpleResamplerElement) Start(ctx context.Context) error {
+    go func() {
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case msg := <-e.InChan:
+                if msg.Type == pipeline.MsgTypeAudio && len(msg.AudioData.Data) > 0 {
+                    // 24k to 48k
+                    input := msg.AudioData.Data
+                    output := make([]byte, len(input)*2)
+                    
+                    for i := 0; i < len(input); i += 2 {
+                        if i+1 < len(input) {
+                            output[i*2] = input[i]
+                            output[i*2+1] = input[i+1]
+                            output[i*2+2] = input[i]
+                            output[i*2+3] = input[i+1]
+                        }
+                    }
+                    
+                    msg.AudioData.Data = output
+                    msg.AudioData.SampleRate = 48000
+                }
+                e.OutChan <- msg
+            }
+        }
+    }()
+    return nil
 }
